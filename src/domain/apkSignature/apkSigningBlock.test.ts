@@ -280,6 +280,96 @@ describe("Zip64 end-of-central-directory", () => {
     if (!tail.ok) return;
     expect(tail.value.totalEntries).toBe(0xffff);
   });
+
+  // Damage to a Zip64 structure the reader supports is malformed-zip, not
+  // zip64-unsupported (issue #6471): the archive declares a supported layout
+  // and the bytes contradict it, so recovery matches classic tail damage.
+  it("reports damaged Zip64 EOCD record bytes as malformed-zip", () => {
+    const body = new Bytes().raw(Array.from({ length: 40 }, () => 0));
+    const cdOffset = body.b.length;
+    const cd = new Bytes().raw([0xca, 0xfe, 0xca, 0xfe]);
+    const recordOffset = cdOffset + cd.b.length;
+    const record = new Bytes()
+      .u32(0x06064b50)
+      .u64(44)
+      .u16(45)
+      .u16(45)
+      .u32(0)
+      .u32(0)
+      .u64(1)
+      .u64(1)
+      .u64(cd.b.length)
+      .u64(cdOffset);
+    const locator = new Bytes().u32(0x07064b50).u32(0).u64(recordOffset).u32(1);
+    const eocd = new Bytes()
+      .u32(0x06054b50)
+      .u16(0)
+      .u16(0)
+      .u16(0xffff)
+      .u16(0xffff)
+      .u32(0xffffffff)
+      .u32(0xffffffff)
+      .u16(0);
+    const bytes = Uint8Array.from([
+      ...body.b,
+      ...cd.b,
+      ...record.b,
+      ...locator.b,
+      ...eocd.b,
+    ]);
+    // corrupt the Zip64 EOCD record signature in place
+    bytes[recordOffset] = 0x00;
+    const tail = parseZipTail(bytes);
+    expect(tail.ok).toBe(false);
+    if (tail.ok) return;
+    expect(tail.error.kind).toBe("malformed-zip");
+    if (tail.error.kind !== "malformed-zip") return;
+    expect(tail.error.offset).toBe(recordOffset + record.b.length); // at the locator
+  });
+
+  it("reports a Zip64 locator pointing past the archive as malformed-zip", () => {
+    const body = new Bytes().raw(Array.from({ length: 40 }, () => 0));
+    const cdOffset = body.b.length;
+    const cd = new Bytes().raw([0xca, 0xfe, 0xca, 0xfe]);
+    const recordOffset = cdOffset + cd.b.length;
+    const record = new Bytes()
+      .u32(0x06064b50)
+      .u64(44)
+      .u16(45)
+      .u16(45)
+      .u32(0)
+      .u32(0)
+      .u64(1)
+      .u64(1)
+      .u64(cd.b.length)
+      .u64(cdOffset);
+    const locator = new Bytes()
+      .u32(0x07064b50)
+      .u32(0)
+      .u64(recordOffset + 4096) // points past the Zip64 record
+      .u32(1);
+    const eocd = new Bytes()
+      .u32(0x06054b50)
+      .u16(0)
+      .u16(0)
+      .u16(0xffff)
+      .u16(0xffff)
+      .u32(0xffffffff)
+      .u32(0xffffffff)
+      .u16(0);
+    const tail = parseZipTail(
+      Uint8Array.from([
+        ...body.b,
+        ...cd.b,
+        ...record.b,
+        ...locator.b,
+        ...eocd.b,
+      ]),
+    );
+    expect(tail.ok).toBe(false);
+    if (tail.ok) return;
+    expect(tail.error).toMatchObject({ kind: "malformed-zip" });
+  });
 });
 
 describe("EOCD that cannot describe the archive", () => {

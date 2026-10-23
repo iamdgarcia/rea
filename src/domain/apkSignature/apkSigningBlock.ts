@@ -132,6 +132,10 @@ const centralDirectoryOffset = (
     entries === ZIP64_ENTRIES_SENTINEL;
   if (!saturated) return ok({ offset, size, entries, end: eocdOffset });
   // Zip64: a locator precedes the EOCD, pointing at the Zip64 EOCD record.
+  // Damage to a structure the reader supports (locator/record present but
+  // inconsistent) is malformed-zip, not zip64-unsupported: the archive declares
+  // a supported layout and the bytes contradict it, so the error family and
+  // recovery must match classic tail damage (issue #6471).
   const locator = eocdOffset - 20;
   if (
     locator < 0 ||
@@ -141,6 +145,8 @@ const centralDirectoryOffset = (
     // is still described completely by its 32-bit EOCD fields.
     if (offset !== ZIP64_SENTINEL && size !== ZIP64_SENTINEL)
       return ok({ offset, size, entries, end: eocdOffset });
+    // Saturated fields with no locator: either a (rare) writer omitted the
+    // locator or it was damaged/corrupted. Undecidable from the bytes alone.
     return err({
       kind: "zip64-unsupported",
       detail: "missing Zip64 EOCD locator",
@@ -153,8 +159,9 @@ const centralDirectoryOffset = (
     dv.getUint32(recordOffset, true) !== ZIP64_EOCD_SIGNATURE
   )
     return err({
-      kind: "zip64-unsupported",
-      detail: "malformed Zip64 EOCD record",
+      kind: "malformed-zip",
+      offset: locator,
+      detail: "Zip64 EOCD locator present but the Zip64 EOCD record is missing, out of range, or its signature is damaged",
     });
   const z64Offset = u64(dv, recordOffset + 48);
   const z64Size = u64(dv, recordOffset + 40);
@@ -162,8 +169,9 @@ const centralDirectoryOffset = (
   const z64Entries = u64(dv, recordOffset + 32);
   if (z64Offset === null || z64Size === null || z64Entries === null)
     return err({
-      kind: "zip64-unsupported",
-      detail: "Zip64 sizes exceed safe range",
+      kind: "malformed-zip",
+      offset: recordOffset + 32,
+      detail: "Zip64 EOCD record sizes exceed the safe range (u64 fields out of range)",
     });
   return ok({
     offset: z64Offset,

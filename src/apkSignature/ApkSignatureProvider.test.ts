@@ -524,6 +524,45 @@ describe("ApkSignatureProvider failure surfaces", () => {
     expect(result.error._tag).toBe("AnalysisInputError");
   });
 
+  it("reports a damaged Zip64 EOCD record as an input error, not an unsupported target (#6471)", async () => {
+    // Zip64-saturated EOCD + valid locator, but the Zip64 EOCD record's
+    // signature is corrupted in place: supported structure, damaged bytes.
+    const apk = syntheticSigned([{ id: V2, value: bogusV2Value() }]);
+    const parts: Buffer[] = [];
+    // rebuild the tail with Zip64 fields: entries/block/cd then z64 record + locator + eocd
+    const bodyLen = 64;
+    const blockLen = apk.length - bodyLen - 22; // apk = entries+block+cd+eocd(22)
+    const entriesAndBlockAndCd = apk.subarray(0, bodyLen + blockLen);
+    const recordOffset = bodyLen + blockLen;
+    const z64Record = Buffer.from([
+      ...u32(0x06064b50), ...u64(44), ...u16(45), ...u16(45),
+      ...u32(0), ...u32(0), ...u64(1), ...u64(1),
+      ...u64(0), ...u64(recordOffset),
+    ]);
+    const locator = Buffer.from([
+      ...u32(0x07064b50), ...u32(0), ...u64(recordOffset), ...u32(1),
+    ]);
+    const eocd = Buffer.from([
+      ...u32(0x06054b50), ...u16(0), ...u16(0),
+      ...u16(0xffff), ...u16(0xffff),
+      ...u32(0xffffffff), ...u32(0xffffffff), ...u16(0),
+    ]);
+    parts.push(
+      Buffer.from(entriesAndBlockAndCd),
+      z64Record,
+      locator,
+      eocd,
+    );
+    const bytes = Buffer.concat(parts);
+    bytes[recordOffset] = 0x00; // damage the Zip64 EOCD signature
+    const result = await provider.inspect({ path: await write("zip64-damaged.apk", bytes) });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error._tag).toBe("AnalysisInputError");
+    // the detail names the damaged Zip64 structure (lives in the projected issues, not the summary)
+    expect(JSON.stringify(result.error)).toContain("Zip64 EOCD record");
+  });
+
   it("reports a malformed declared lineage instead of dropping it", async () => {
     const lineage = [...u32(0x3ba06f8c), ...u32(1), ...u32(999)];
     const r = (await reportOf(
